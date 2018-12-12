@@ -1,56 +1,111 @@
 (ns fibre.core
   (:gen-class)
-  (:import (java.util.concurrent TimeUnit TimeoutException Future ArrayBlockingQueue)
+  (:import (java.util.concurrent TimeUnit TimeoutException Future ArrayBlockingQueue CancellationException)
            (clojure.lang IPending IBlockingDeref IDeref)))
 
-
-(def q (ArrayBlockingQueue. 64 true))
+(defonce q (ArrayBlockingQueue. 64 true))
 
 (defn submit-task
   [task-fn]
   (let [p (promise)
         f (reify
             IDeref
-            (deref [_] (-> p deref deref))
+            (deref [_] (if (and (realized? p)
+                                (= ::cancelled @p))
+                         (throw (CancellationException.))
+                         (-> p deref deref)))
 
             IBlockingDeref
             (deref
-                [_ timeout-ms timeout-val]
-              (if (realized? p)
+              [_ timeout-ms timeout-val]
+              (cond
+                (and (realized? p)
+                     (= ::cancelled @p))
+                (throw (CancellationException.))
+
+                (realized? p)
                 (deref @p timeout-ms timeout-val)
+
+                :else
                 (let [t (System/currentTimeMillis)
                       x (deref p timeout-ms ::timeout)]
                   (if (= ::timeout x)
                     timeout-val
                     (deref x
-                           (- timeout-ms (- (System/currentTimeMillis) t))
+                           (->> t
+                                (- (System/currentTimeMillis))
+                                (max 0)
+                                (- timeout-ms))
                            timeout-val)))))
 
             IPending
-            (isRealized [_] (if (realized? p) (.isDone @p) false))
+            (isRealized [_] (cond
+                              (and (realized? p)
+                                   (future? @p))
+                              (.isDone @p)
+
+                              (realized? p)
+                              true
+
+                              :else false))
 
             Future
-            (get [_] (-> p deref deref))
+            (get [_] (if (and (realized? p)
+                              (= ::cancelled @p))
+                       (throw (CancellationException.))
+                       (-> p deref deref)))
             (get [_ timeout unit]
-              (if (realized? p)
+              (cond
+                (and (realized? p)
+                     (= ::cancelled @p))
+                (throw (CancellationException.))
+
+                (realized? p)
                 (.get @p timeout unit)
+
+                :else
                 (let [t (System/currentTimeMillis)
                       timeout-ms (.convert TimeUnit/MILLISECONDS timeout unit)
                       x (deref p timeout-ms ::timeout)]
                   (if (= ::timeout x)
                     (throw (TimeoutException.))
                     (.get x
-                          (- timeout-ms (- (System/currentTimeMillis) t))
+                          (->> t
+                               (- (System/currentTimeMillis))
+                               (max 0)
+                               (- timeout-ms))
                           TimeUnit/MILLISECONDS)))))
-            (isCancelled [_] (if (realized? p)
+            (isCancelled [_] (cond
+                               (and (realized? p)
+                                    (future? @p))
                                (.isCancelled @p)
-                               false))
-            (isDone [_] (if (realized? p)
+
+                               (realized? p)
+                               true
+
+                               :else false))
+            (isDone [_] (cond
+                          (and (realized? p)
+                               (future? @p))
                           (.isDone @p)
-                          false))
-            (cancel [_ interrupt?] (if (realized? p)
+
+                          (realized? p)
+                          true
+
+                          :else false))
+            (cancel [_ interrupt?] (cond
+                                     (and (realized? p)
+                                          (future? @p))
                                      (.cancel @p interrupt?)
-                                     false)))] ;; @TODO implement cancellation
+
+                                     (realized? p)
+                                     (try (.cancel @p interrupt?)
+                                          (catch Exception _ true))
+
+                                     :else
+                                     (if (deliver p ::cancelled)
+                                       true
+                                       (.cancel @p interrupt?)))))]
     (.put q {:pr p :task-fn task-fn})
     f))
 
@@ -59,10 +114,13 @@
   []
   (future
     (loop []
-      (let [{:keys [pr task-fn]} (.take q)
-            f (future (task-fn))]
-        (deliver pr f)
-        @f
+      (let [{:keys [pr task-fn]} (.take q)]
+        (when-not (realized? pr)
+          (let [f (future (task-fn))]
+            (if-not (deliver pr f)
+              (future-cancel f)
+              (try @f
+                   (catch CancellationException _)))))
         (recur)))))
 
 

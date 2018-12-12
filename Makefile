@@ -7,4 +7,7 @@ test: compile
 start: compile
 	lein repl
 
+testmultiple: compile
+	sh ./tools/runtests.sh
+
 .PHONY: test

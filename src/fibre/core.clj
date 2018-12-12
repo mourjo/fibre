@@ -1,11 +1,10 @@
 (ns fibre.core
   (:gen-class)
-  (:require [clojure.core.async :as async])
-  (:import (java.util.concurrent TimeUnit TimeoutException Future)
+  (:import (java.util.concurrent TimeUnit TimeoutException Future ArrayBlockingQueue)
            (clojure.lang IPending IBlockingDeref IDeref)))
 
 
-(defonce q (async/chan 64))
+(def q (ArrayBlockingQueue. 64 true))
 
 (defn submit-task
   [task-fn]
@@ -52,7 +51,7 @@
             (cancel [_ interrupt?] (if (realized? p)
                                      (.cancel @p interrupt?)
                                      false)))] ;; @TODO implement cancellation
-    (async/>!! q {:pr p :task-fn task-fn})
+    (.put q {:pr p :task-fn task-fn})
     f))
 
 
@@ -60,7 +59,7 @@
   []
   (future
     (loop []
-      (let [{:keys [pr task-fn]} (async/<!! q)
+      (let [{:keys [pr task-fn]} (.take q)
             f (future (task-fn))]
         (deliver pr f)
         @f

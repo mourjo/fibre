@@ -39,15 +39,10 @@
                            timeout-val)))))
 
             IPending
-            (isRealized [_] (cond
-                              (and (realized? p)
-                                   (future? @p))
-                              (.isDone @p)
-
-                              (realized? p)
-                              true
-
-                              :else false))
+            (isRealized [_] (if (realized? p)
+                              (try (.isDone @p)
+                                   (catch IllegalArgumentException _ true))
+                              false))
 
             Future
             (get [_] (if (and (realized? p)
@@ -75,37 +70,24 @@
                                (max 0)
                                (- timeout-ms))
                           TimeUnit/MILLISECONDS)))))
-            (isCancelled [_] (cond
-                               (and (realized? p)
-                                    (future? @p))
-                               (.isCancelled @p)
-
-                               (realized? p)
-                               true
-
-                               :else false))
-            (isDone [_] (cond
-                          (and (realized? p)
-                               (future? @p))
-                          (.isDone @p)
-
-                          (realized? p)
-                          true
-
-                          :else false))
+            (isCancelled [_] (if (realized? p)
+                               (try (.isCancelled @p)
+                                    (catch IllegalArgumentException _ true))
+                               false))
+            (isDone [_] (if (realized? p)
+                          (try (.isDone @p)
+                               (catch IllegalArgumentException _ true))
+                          false))
             (cancel [_ interrupt?] (cond
-                                     (and (realized? p)
-                                          (future? @p))
-                                     (.cancel @p interrupt?)
-
                                      (realized? p)
                                      (try (.cancel @p interrupt?)
-                                          (catch Exception _ true))
+                                          (catch IllegalArgumentException _ true))
+
+                                     (deliver p ::cancelled)
+                                     true
 
                                      :else
-                                     (if (deliver p ::cancelled)
-                                       true
-                                       (.cancel @p interrupt?)))))]
+                                     (.cancel @p interrupt?))))]
     (.put q {:pr p :task-fn task-fn})
     f))
 

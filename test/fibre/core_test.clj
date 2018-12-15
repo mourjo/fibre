@@ -35,8 +35,12 @@
     (dotimes [_ 1000]
       (let [f1 (sut/in-future wait-forever)
             f2 (sut/in-future #(+ 1 2))]
+        (is (not (future-done? f1)))
         (is (future-cancel f1))
-        (is (= @f2 3)))
+        (is (future-cancelled? f1))
+        (is (future-done? f1))
+        (is (= @f2 3))
+        (is (future-done? f2)))
 
       (let [a (atom [])
             f1 (sut/in-future #(do (wait-forever)

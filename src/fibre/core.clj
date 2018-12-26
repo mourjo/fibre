@@ -4,6 +4,7 @@
            (clojure.lang IPending IBlockingDeref IDeref)))
 
 (defonce q (ArrayBlockingQueue. 64 true))
+(defonce scheduler nil)
 
 (defn submit-task
   [task-fn]
@@ -102,18 +103,24 @@
             (if-not (deliver pr f)
               (future-cancel f)
               (try @f
-                   (catch CancellationException _)))))
-        (recur)))))
+                   (catch Throwable _)))))
+        (when-not (Thread/interrupted)
+          (recur))))))
 
 
 
 (defn start-task-scheduler
   []
-  (task-scheduler))
+  (let [f (task-scheduler)]
+    (alter-var-root #'scheduler (constantly f))))
+
+
+(defn stop-task-scheduler
+  []
+  (try (future-cancel scheduler) (catch Throwable _))
+  (alter-var-root #'scheduler (constantly nil)))
 
 
 (defn in-future
   [f]
   (submit-task f))
-
-

@@ -1,16 +1,22 @@
 (ns fibre.core-test
   (:require [clojure.test :refer :all]
-            [fibre.core :as sut])
-  (:import (java.util.concurrent CancellationException)))
+            [fibre.core :as sut]
+            [clojure.test.check.clojure-test :refer :all]
+            [clojure.test.check :as tc]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop])
+  (:import (java.util.concurrent CancellationException ArrayBlockingQueue Executors)))
 
 
-(defn start-scheduler
+(defn start-and-stop-scheduler
   [t]
-  (let [sched-f (sut/start-task-scheduler)]
-    (try (t)
-         (finally (future-cancel sched-f)))))
+  (try (sut/start-task-scheduler)
+       (t)
+       (finally (sut/stop-task-scheduler)
+                (alter-var-root #'fibre.core/q
+                                (fn [& _] (ArrayBlockingQueue. 64 true))))))
 
-(use-fixtures :once start-scheduler)
+(use-fixtures :each start-and-stop-scheduler)
 
 
 (deftest simple-test
@@ -53,3 +59,74 @@
         (is (= [] @a))
         (is (thrown? CancellationException @f2))
         (is (thrown? CancellationException @f1))))))
+
+
+(def future-operations
+  {;; :cancel (fn [f] (future-cancel f))
+   :cancelled? (fn [f] (future-cancelled? f))
+   :done? (fn [f] (future-done? f))
+   :deref (fn [f] @f)
+   :realized? (fn [f] (realized? f))
+   :deref-timeout-1 (fn [f] (deref f 1 ::timeout))
+   :deref-timeout-2 (fn [f] (deref f 2 ::timeout))})
+
+
+(def future-tasks
+  {:sleep-10 (fn [data] (Thread/sleep 10) data)
+   :sleep-20 (fn [data] (Thread/sleep 20) data)
+   :sleep-random-100 (fn [data] (Thread/sleep (rand-int 100)) data)})
+
+
+(defn run-tasks
+  [tasks val]
+  (reduce (fn [acc f]
+            (when (Thread/interrupted) (throw (InterruptedException.)))
+            (f acc))
+          val
+          (mapv future-tasks tasks)))
+
+
+(defn launch-future
+  [^java.util.concurrent.ExecutorService tp ^Callable f]
+  (let [fut ^java.util.concurrent.Future (.submit tp f)]
+    (reify
+      clojure.lang.IDeref
+      (deref [_] (#'clojure.core/deref-future fut))
+      clojure.lang.IBlockingDeref
+      (deref
+          [_ timeout-ms timeout-val]
+        (#'clojure.core/deref-future fut timeout-ms timeout-val))
+      clojure.lang.IPending
+      (isRealized [_] (.isDone fut))
+      java.util.concurrent.Future
+      (get [_] (.get fut))
+      (get [_ timeout unit] (.get fut timeout unit))
+      (isCancelled [_] (.isCancelled fut))
+      (isDone [_] (.isDone fut))
+      (cancel [_ interrupt?] (.cancel fut interrupt?)))))
+
+
+(defspec future-task-execution
+  100
+  (let [tp (Executors/newFixedThreadPool 1)]
+    (prop/for-all
+     [fut-ops (gen/vector (gen/elements (keys future-tasks)) 0 10)
+      tasks (gen/vector (gen/elements (keys future-operations)) 0 5)
+      op gen/int]
+     (let [task-chain #(run-tasks tasks op)
+           cf ^java.util.concurrent.Future (launch-future tp task-chain)
+           _ (sut/in-future task-chain)
+           mf (sut/in-future task-chain)
+           _ (sut/in-future task-chain)]
+
+       (doseq [f-opt fut-ops]
+         (let [opt (future-tasks f-opt)]
+           (try (opt cf)
+                (catch Throwable _))
+           (try (opt mf)
+                (catch Throwable _))))
+
+       (= (try @cf
+               (catch Throwable t (class t)))
+          (try @mf
+               (catch Throwable t (class t))))))))
